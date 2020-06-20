@@ -121,8 +121,17 @@ var c = cache.New(dnscacheTime, dnscachePurge)
 // ctarget cached target used for resolving
 var ctarget string
 
-// udpSourcePort used for sending udp packets
-var udpSourcePort int
+// udpSourceAddr used for sending udp packets
+var udpSourceAddr *net.UDPAddr
+
+func getUdpLocalAddr() *net.UDPAddr {
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr)
+}
 
 // sockBufferMaxSize() returns the maximum size that the UDP receive buffer
 // in the kernel can be set to.  In bytes.
@@ -199,13 +208,10 @@ func genTags(metric, metricTags string) string {
 func sendPacket(buff []byte, target string, sendproto string, TCPtimeout time.Duration, boff *backoff.Backoff) {
 	switch sendproto {
 	case "UDP":
-		var laddr *net.UDPAddr
-		if udpSourcePort != 0 {
-			laddr = &net.UDPAddr{Port: udpSourcePort}
-		}
-		conn, err := net.ListenUDP("udp", laddr)
+		conn, err := net.ListenUDP("udp", udpSourceAddr)
 		if err != nil {
-			log.Panicln(err)
+			log.Printf("error in conneection %s\n", err)
+			return
 		}
 		conn.WriteToUDP(buff, udpAddr[target])
 		conn.Close()
@@ -455,7 +461,8 @@ func readUDP(ip string, port int, c chan []byte) {
 			timeout = true
 			err = sock.SetDeadline(time.Now().Add(time.Second))
 			if err != nil {
-				log.Panicln(err)
+				log.Printf("Set deadline Error: %s\n", err)
+				continue
 			}
 		} else {
 			log.Printf("Read Error: %s\n", err)
@@ -500,6 +507,7 @@ func runServer(host string, port int) {
 func main() {
 	var bindAddress string
 	var port int
+	var udpSingleSource bool
 
 	flag.IntVar(&port, "port", 9125, "Port to listen on")
 	flag.IntVar(&port, "p", 9125, "Port to listen on")
@@ -535,7 +543,7 @@ func main() {
 	flag.DurationVar(&TCPMinBackoff, "backoff-min", 50*time.Millisecond, "Backoff minimal (integer) time in Millisecond")
 	flag.DurationVar(&TCPMaxBackoff, "backoff-max", 1000*time.Millisecond, "Backoff maximal (integer) time in Millisecond")
 	flag.Float64Var(&TCPFactorBackoff, "backoff-factor", 1.5, "Backoff factor (float)")
-	flag.IntVar(&udpSourcePort, "udp-source-port", 0, "Port for using fixed port while sending udp")
+	flag.BoolVar(&udpSingleSource, "udp-single-source", false, "To use a single source for outbound udp traffic")
 
 	defaultBufferSize, err := getSockBufferMaxSize()
 	if err != nil {
@@ -590,6 +598,10 @@ func main() {
 			udpAddr[v] = addr
 			hashRing.AddNode(Node{v, ""})
 		}
+	}
+
+	if udpSingleSource {
+		udpSourceAddr = getUdpLocalAddr()
 	}
 
 	epochTime = time.Now().Unix()
