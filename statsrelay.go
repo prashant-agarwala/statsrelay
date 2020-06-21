@@ -50,6 +50,9 @@ var metricTags string
 // udpAddr is a mapping of HOST:PORT:INSTANCE to a UDPAddr object
 var udpAddr = make(map[string]*net.UDPAddr)
 
+// udpSourceAddr is a mapping of HOST:PORT:INSTANCE to a UDPAddr object used when udp single source is enabled
+var udpSourceAddr = make(map[string]*net.UDPAddr)
+
 // tcpAddr is a mapping of HOST:PORT:INSTANCE to a TCPAddr object
 var tcpAddr = make(map[string]*net.TCPAddr)
 
@@ -121,8 +124,6 @@ var c = cache.New(dnscacheTime, dnscachePurge)
 // ctarget cached target used for resolving
 var ctarget string
 
-// udpSourceAddr used for sending udp packets
-var udpSourceAddr *net.UDPAddr
 
 func getUdpLocalAddr() *net.UDPAddr {
 	conn, err := net.ListenUDP("udp", nil)
@@ -208,10 +209,13 @@ func genTags(metric, metricTags string) string {
 func sendPacket(buff []byte, target string, sendproto string, TCPtimeout time.Duration, boff *backoff.Backoff) {
 	switch sendproto {
 	case "UDP":
-		conn, err := net.ListenUDP("udp", udpSourceAddr)
+		conn, err := net.ListenUDP("udp", udpSourceAddr[target])
 		if err != nil {
-			log.Printf("error in conneection %s\n", err)
-			return
+			conn, err = net.ListenUDP("udp", nil)
+			if err != nil {
+				log.Printf("error in connection %s\n", err)
+				return
+			}
 		}
 		conn.WriteToUDP(buff, udpAddr[target])
 		conn.Close()
@@ -599,9 +603,10 @@ func main() {
 			hashRing.AddNode(Node{v, ""})
 		}
 	}
-
 	if udpSingleSource {
-		udpSourceAddr = getUdpLocalAddr()
+		for k := range udpAddr {
+			udpSourceAddr[k] = getUdpLocalAddr()
+		}
 	}
 
 	epochTime = time.Now().Unix()
