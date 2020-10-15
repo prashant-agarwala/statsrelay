@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-const VERSION string = "0.0.9"
+const VERSION string = "0.1.0"
 
 // BUFFERSIZE controls the size of the [...]byte array used to read UDP data
 // off the wire and into local memory.  Metrics are separated by \n
@@ -46,9 +46,6 @@ var metricsPrefix string
 // Such as my.prefix.myinc:1|c|@1.000000|#baz,foo:bar
 // Default is empty
 var metricTags string
-
-// udpAddr is a mapping of HOST:PORT:INSTANCE to a UDPAddr object
-var udpAddr = make(map[string]*net.UDPAddr)
 
 // udpSourceAddr is a mapping of HOST:PORT:INSTANCE to a UDPAddr object used when udp single source is enabled
 var udpSourceAddr = make(map[string]*net.UDPAddr)
@@ -123,7 +120,6 @@ var c = cache.New(dnscacheTime, dnscachePurge)
 
 // ctarget cached target used for resolving
 var ctarget string
-
 
 func getUdpLocalAddr() *net.UDPAddr {
 	conn, err := net.ListenUDP("udp", nil)
@@ -204,6 +200,36 @@ func genTags(metric, metricTags string) string {
 	return fmt.Sprintf("%s|#%s", metric, metricTags)
 }
 
+func getUDPDestnAddr(target string) *net.UDPAddr {
+	if !dnscache {
+		targetaddr, err := net.ResolveUDPAddr("udp", target)
+		if err != nil {
+			log.Printf("Error resolving target %s", target)
+			return nil
+		}
+		return targetaddr
+	}
+
+	gettarget, found := c.Get(target)
+	if found {
+		if verbose {
+			log.Printf("Found in cache target %s (%s)", target, gettarget)
+		}
+		return gettarget.(*net.UDPAddr)
+	} else {
+		targetaddr, err := net.ResolveUDPAddr("udp", target)
+		if verbose {
+			log.Printf("Not found in cache adding target %s (%s)", target, targetaddr)
+		}
+		if err != nil {
+			log.Printf("Error resolving target %s", target)
+			return nil
+		}
+		c.Set(target, targetaddr, dnscacheExp)
+		return targetaddr
+	}
+}
+
 // sendPacket takes a []byte and writes that directly to a UDP socket
 // that was assigned for target.
 func sendPacket(buff []byte, target string, sendproto string, TCPtimeout time.Duration, boff *backoff.Backoff) {
@@ -217,7 +243,7 @@ func sendPacket(buff []byte, target string, sendproto string, TCPtimeout time.Du
 				return
 			}
 		}
-		conn.WriteToUDP(buff, udpAddr[target])
+		conn.WriteToUDP(buff, getUDPDestnAddr(target))
 		conn.Close()
 	case "TCP":
 		if verbose {
@@ -312,26 +338,6 @@ func handleBuff(buff []byte) {
 			target := hashRing.GetNode(metric).Server
 			ctarget := target
 
-			// resolve and cache
-			if dnscache {
-				gettarget, found := c.Get(target)
-				if found {
-					ctarget = gettarget.(string)
-					if verbose {
-						log.Printf("Found in cache target %s (%s)", target, ctarget)
-					}
-				} else {
-					targetaddr, err := net.ResolveUDPAddr("udp", target)
-					if verbose {
-						log.Printf("Not found in cache adding target %s (%s)", target, ctarget)
-					}
-					if err != nil {
-						log.Printf("Error resolving target %s", target)
-					}
-					c.Set(target, targetaddr.String(), dnscacheExp)
-					ctarget = targetaddr.String()
-				}
-			}
 			// check built packet size and send if metric doesn't fit
 			if packets[target].Len()+size > packetLen {
 				sendPacket(packets[target].Bytes(), ctarget, sendproto, TCPtimeout, boff)
@@ -529,10 +535,10 @@ func main() {
 	flag.BoolVar(&verbose, "verbose", false, "Verbose output")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
 
-	flag.BoolVar(&dnscache, "dnscache", false, "Enable in app DNS cache for resolved TCP sendout sharded endpoints")
-	flag.DurationVar(&dnscacheTime, "dnscache-time", 1*time.Second, "Time we cache resolved adresses of sharded endpoint")
-	flag.DurationVar(&dnscachePurge, "dnscache-purge", 5*time.Second, "When we purge stale elements in cache")
-	flag.DurationVar(&dnscacheExp, "dnscache-expiration", 1*time.Second, "When set new object after resolv then use this expiration time in cache")
+	flag.BoolVar(&dnscache, "dnscache", false, "Enable in app DNS cache for resolving sharded endpoints")
+	flag.DurationVar(&dnscacheTime, "dnscache-time", 30*time.Second, "Time we cache resolved adresses of sharded endpoint")
+	flag.DurationVar(&dnscachePurge, "dnscache-purge", 60*time.Second, "When we purge stale elements in cache")
+	flag.DurationVar(&dnscacheExp, "dnscache-expiration", 30*time.Second, "When set new object after resolv then use this expiration time in cache")
 
 	flag.StringVar(&sendproto, "sendproto", "UDP", "IP Protocol for sending data: TCP, UDP, or TEST")
 	flag.IntVar(&packetLen, "packetlen", 1400, "Max packet length. Must be lower than MTU plus IPv4 and UDP headers to avoid fragmentation.")
@@ -572,6 +578,9 @@ func main() {
 			log.Println(http.ListenAndServe(profilingBind, nil))
 		}()
 	}
+
+	// udpAddr is a mapping of HOST:PORT:INSTANCE to a UDPAddr object
+	udpAddr := make(map[string]*net.UDPAddr)
 
 	for _, v := range flag.Args() {
 		var addr *net.UDPAddr
